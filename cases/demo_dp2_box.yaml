@@ -1,0 +1,20 @@
+# Small demo: DP2 tract 5063 cut to a ~0.07 deg2 box inside the HST field, so every stage runs in minutes.
+# Used by notebooks/copaings_demo.ipynb. Adapt repo/collections to your own butler.
+name: demo_dp2_box
+out_root: ./copaings_runs
+
+repo: dp2_prep
+collections: LSSTCam/runs/DRP/DP2/v30_0_8/DM-55060/stage3
+skymap: lsst_cells_v2
+dataset_type: object
+tracts: [5063]
+sky_box: [53.00, 53.30, -27.95, -27.70]   # [ra_min, ra_max, dec_min, dec_max] in deg
+common_frame_xy: true
+
+linking_length: 3.0
+mag_cut: 35
+euclid_region: auto
+eot_dense_max: 0
+
+n_eot_tasks: 4
+n_sb_tasks: 4

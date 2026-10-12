@@ -1,0 +1,28 @@
+# One yaml per LSST catalog "case". Only `name` is required; everything else has a default (see copaings/config.py).
+name: dp2_example
+out_root: /sdf/group/rubin/user/cdoux/blend_runs
+
+# --- LSST catalog (butler)
+repo: dp2_prep                 # TODO: your repo
+collections: u/cdoux/YOUR_COLLECTION
+skymap: lsst_cells_v2
+dataset_type: object           # TODO: the dataset type holding your catalog
+tracts: [5063]
+lsst_pixel_scale: 0.2
+# lsst_columns:                # only if your column names differ from DP1, e.g.
+#   i_cModelFlux: i_cModel_instFlux
+
+# --- selection / matching
+linking_length: 2.0
+mag_cut: 35
+only_hst_field: false
+
+# --- parallelism
+n_eot_tasks: 100
+n_sb_tasks: 100
+
+# --- slurm
+setup_cmd: "source /sdf/group/rubin/sw/w_latest/loadLSST.bash && setup lsst_distrib"   # TODO: match the env of your notebook kernel
+partition: milano
+account: "rubin:developers"   # alternatives on milano: rubin:commissioning
+mem: 32G

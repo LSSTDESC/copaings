@@ -1,0 +1,29 @@
+[build-system]
+requires = ["setuptools>=61"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "copaings"
+version = "0.1.0"
+description = "Unrecognized-blend and blending-entropy (S_b) analysis of LSST catalogs against Euclid and HST, as a slurm-parallel pipeline"
+readme = "README.md"
+license = {file = "LICENSE"}
+classifiers = ["License :: OSI Approved :: MIT License"]
+requires-python = ">=3.10"
+dependencies = [
+    "numpy", "pandas", "scipy", "astropy", "healpy", "pyyaml", "matplotlib",
+    "scikit-learn", "tqdm", "pyarrow", "networkx",
+]
+
+[project.optional-dependencies]
+test = ["pytest"]
+notebook = ["jupyter", "nbformat"]
+
+[project.scripts]
+copaings = "copaings.cli:main"
+
+[tool.setuptools]
+packages = ["copaings"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]

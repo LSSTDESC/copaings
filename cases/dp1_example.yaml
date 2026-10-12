@@ -1,0 +1,22 @@
+# DP1 (ComCam) ECDFS: reproduces the notebook run (tract 5063, ll=2", mag_cut=35).
+name: dp1_ecdfs
+out_root: /sdf/group/rubin/user/cdoux/blend_runs
+
+repo: /repo/dp1
+collections: LSSTComCam/DP1
+skymap: lsst_cells_v1
+dataset_type: object
+tracts: [4636, 4637, 4638, 4847, 4848, 4849, 4850, 5061, 5062, 5063, 5064, 5065, 5279, 5280, 5281, 5282]
+lsst_pixel_scale: 0.2
+
+linking_length: 2.0
+mag_cut: 35
+only_hst_field: false
+
+n_eot_tasks: 100
+n_sb_tasks: 100
+
+setup_cmd: "source /sdf/group/rubin/sw/w_latest/loadLSST.bash && setup lsst_distrib"
+partition: milano
+account: "rubin:developers"   # alternatives on milano: rubin:commissioning
+mem: 32G

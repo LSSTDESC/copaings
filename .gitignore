@@ -1,0 +1,13 @@
+__pycache__/
+*.pyc
+.ipynb_checkpoints/
+*.egg-info/
+build/
+dist/
+# pipeline outputs
+copaings_runs/
+runs/
+notebooks/copaings_runs/
+*.pkl
+*.parquet
+slurm/
