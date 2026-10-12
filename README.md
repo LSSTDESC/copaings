@@ -41,7 +41,7 @@ Group indices are row positions in the `prep` parquet files; all later stages re
 ## Install
 
 ```bash
-git clone <this repo> && cd copaings
+git clone https://github.com/LSSTDESC/copaings.git && cd copaings
 pip install -e .            # numpy pandas scipy astropy healpy pyyaml matplotlib scikit-learn tqdm pyarrow networkx
 pip install -e ".[test]"    # pytest
 ```
