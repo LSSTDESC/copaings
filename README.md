@@ -1,13 +1,14 @@
 # copaings
 
-Pipeline to measure **unrecognized blends** and the **blending entropy S_b** of LSST (DP1 / DP2) object catalogs against the higher-resolution
+Pipeline to measure **unrecognized blends** and the **blending entropy S_b** ([arXiv:2609.12158](https://arxiv.org/abs/2609.12158)) of LSST (DP1 / DP2) object catalogs against the higher-resolution
 Euclid Q1 (MER) and HST (HLF GOODS-S) catalogs, built to run as parallel slurm jobs and to compare many catalog variants
 (for example visit-subset reruns). It is a restructuring and extension of the original analysis notebook, using Mesquita's
-`friendly` matching / ellipse / entropy code (see *Dependencies*).
+[`friendly`](https://github.com/LSSTDESC/friendly) matching / ellipse / entropy code (see *Dependencies*).
 
 What it computes, for each LSST object: whether it is part of a group where several true galaxies fall on fewer LSST detections
 (unrecognized blend), and its blending entropy S_b, the entropy of the probabilities that it matches each overlapping true galaxy
-(from ellipse overlaps and magnitude differences).
+(from ellipse overlaps and magnitude differences). The blending entropy is described, used and tested in
+[arXiv:2609.12158](https://arxiv.org/abs/2609.12158); the entropy itself is computed by `friendly`.
 
 Start with **`notebooks/copaings_demo.ipynb`**: it runs every stage in a cell on a small piece of sky and ends with the S_b curve.
 
@@ -47,7 +48,7 @@ pip install -e ".[test]"    # pytest
 
 ### Dependencies you must provide
 
-* **`friendly`** (matching, ellipses, graphs, entropy). Either `pip install` it, or point `FRIENDLY_PATH` to the directory that contains the package.
+* **[`friendly`](https://github.com/LSSTDESC/friendly)** (matching, ellipses, graphs, entropy). Either `pip install` it, or point `FRIENDLY_PATH` to the directory that contains the package.
   `my_blending_lib` is only needed for the slow reference EOT (`fast_eot: false`); set `BLENDING_LIB_PATH` if needed.
 * **LSST science pipelines + butler**, only for `prep` (the other stages run without them: source `loadLSST.bash`, no `setup`).
 * Euclid Q1 MER tile catalogs (`euclid_dir`) and the HST HLF catalog (`hst_file`); the defaults are the SLAC S3DF paths.
@@ -109,7 +110,12 @@ tests/
 
 ## Credits
 
-Matching, ellipse and entropy machinery: Mesquita's `friendly` and `my_blending_lib` (not part of this repository; check their licence).
+Matching, ellipse and entropy machinery: Mesquita's [`friendly`](https://github.com/LSSTDESC/friendly) and `my_blending_lib` (not part of this repository; check their licence).
+
+## References
+
+* Blending entropy: [arXiv:2609.12158](https://arxiv.org/abs/2609.12158), where it is described, used and tested.
+* `friendly`: https://github.com/LSSTDESC/friendly
 
 ## License
 

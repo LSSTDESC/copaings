@@ -1,5 +1,7 @@
 """Blending entropy per group, using friendly only (no LSST stack).
 
+The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158);
+the matching, ellipse and entropy code is the `friendly` package (https://github.com/LSSTDESC/friendly).
 Same logic as ``my_blending_lib.compute_Sb``, plus a guard against node-id collisions (see `_group_sb_remapped`).
 """
 import sys
@@ -111,6 +113,10 @@ def compute_Sb(groups, true_cat, obs_cat, link_type='ellipse', Sb_col_name_in_ob
         Overlap definition: ``'ellipse'`` or friendly's Gaussian overlap.
     Sb_col_name_in_obs_cat : str, default 'blending_entropy'
         Column of `obs_cat` that receives the entropy; the purity goes to the column ``purity``.
+
+    Notes
+    -----
+    The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
     """
     warnings.filterwarnings('ignore', category=FutureWarning)
     warnings.filterwarnings('ignore', category=RuntimeWarning)

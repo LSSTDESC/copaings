@@ -1,5 +1,7 @@
 """Access to the `friendly` package (and, optionally, Mesquita's my_blending_lib).
 
+`friendly`: https://github.com/LSSTDESC/friendly
+
 Where to find them:
   * `friendly` installed in the environment (pip install -e <path to friendly>): nothing to do, or
   * set the environment variable FRIENDLY_PATH to the directory that contains the `friendly` package, or
@@ -34,7 +36,7 @@ def mbl():
 
 
 def matching():
-    """Import and return ``friendly.matching`` (friends-of-friends matching).
+    """Import and return ``friendly.matching`` (friends-of-friends matching), from https://github.com/LSSTDESC/friendly.
 
     Returns
     -------

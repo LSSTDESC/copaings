@@ -496,7 +496,7 @@ def sb(case, tel, task_id, n_tasks):
     Notes
     -----
     Writes ``sb/<E|H>_part_<task_id>.parquet``, indexed by LSST row, with columns ``blending_entropy_<tel>`` and
-    ``purity_<tel>``.
+    ``purity_<tel>``. The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
     """
     _quiet()
     from .sb_core import compute_Sb
@@ -544,6 +544,7 @@ def sb_merge(case, n_tasks):
     Notes
     -----
     Writes ``lsst_sb.parquet`` (the LSST catalog with the entropy and purity columns) and ``sb/sb_merge_stats.json``.
+    The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
     """
     lsst = read_cat(case, 'lsst_fit')
     N = len(lsst)

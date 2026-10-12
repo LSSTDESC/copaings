@@ -15,6 +15,11 @@ dependencies = [
     "scikit-learn", "tqdm", "pyarrow", "networkx",
 ]
 
+[project.urls]
+Homepage = "https://github.com/LSSTDESC/copaings"
+friendly = "https://github.com/LSSTDESC/friendly"
+"Blending entropy paper" = "https://arxiv.org/abs/2609.12158"
+
 [project.optional-dependencies]
 test = ["pytest"]
 notebook = ["jupyter", "nbformat"]
