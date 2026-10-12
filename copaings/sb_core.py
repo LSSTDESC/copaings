@@ -2,7 +2,7 @@
 
 The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158);
 the matching, ellipse and entropy code is the `friendly` package (https://github.com/LSSTDESC/friendly).
-Same logic as ``my_blending_lib.compute_Sb``, plus a guard against node-id collisions (see `_group_sb_remapped`).
+Per-group graph and entropy computation of `friendly`, plus a guard against node-id collisions (see `_group_sb_remapped`).
 """
 import sys
 import warnings
@@ -97,8 +97,7 @@ def _group_sb_remapped(group, true_cat, obs_cat, link_type):
 def compute_Sb(groups, true_cat, obs_cat, link_type='ellipse', Sb_col_name_in_obs_cat='blending_entropy'):
     """Blending entropy and purity of the LSST objects of a list of groups.
 
-    Needs only friendly (no LSST stack); same logic as ``my_blending_lib.compute_Sb`` plus a guard for node id
-    collisions.
+    Needs only friendly (no LSST stack); a guard handles node id collisions.
 
     Parameters
     ----------

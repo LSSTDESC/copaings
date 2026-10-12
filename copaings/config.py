@@ -32,6 +32,8 @@ DEFAULT_LSST_COLUMNS = {
     'g_blendedness': 'g_blendedness',
 }
 
+_REMOVED_KEYS = ('fast_eot',)  # the slow reference overlap test was removed; the fast one is the only one
+
 TELESCOPES = ('Euclid', 'HST')  # name of the "true" catalogs; initial is used in file names
 
 
@@ -76,8 +78,6 @@ class Case:
         Objects fainter than this (own band) are removed from the three catalogs.
     telescopes : list of str
         Names of the "true" catalogs to process.
-    fast_eot : bool, default True
-        Use `copaings.eot_fast` instead of friendly's graph code for the ellipse overlap test.
     eot_dense_max : int, default 400
         FoF groups with more members than this use the KD-tree pair search in the fast overlap test (0 = always).
     fast_sb_mc : bool, default True
@@ -133,8 +133,6 @@ class Case:
     mag_cut: float = 35.0
     telescopes: list = field(default_factory=lambda: list(TELESCOPES))
 
-    # Use copaings.eot_fast (same components as friendly's group2graph, ~50-80x faster). False = friendly's code.
-    fast_eot: bool = True
     # Groups up to this many members test all pairs in the fast EOT (an object with undefined moments then counts as
     # overlapping with the whole group, like friendly); bigger groups use a KD-tree where it only links to neighbours
     # within a few arcsec. 0 = always the KD-tree path (consistent across linking lengths, used by the FoF-length tests).
@@ -179,6 +177,8 @@ class Case:
         """
         with open(path) as f:
             d = yaml.safe_load(f) or {}
+        for key in _REMOVED_KEYS:  # options that no longer exist; ignored so that old case.yaml files still load
+            d.pop(key, None)
         known = {f.name for f in fields(cls)}
         unknown = set(d) - known
         if unknown:

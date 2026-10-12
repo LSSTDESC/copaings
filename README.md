@@ -2,8 +2,8 @@
 
 Pipeline to measure **unrecognized blends** and the **blending entropy S_b** ([arXiv:2609.12158](https://arxiv.org/abs/2609.12158)) of LSST (DP1 / DP2) object catalogs against the higher-resolution
 Euclid Q1 (MER) and HST (HLF GOODS-S) catalogs, built to run as parallel slurm jobs and to compare many catalog variants
-(for example visit-subset reruns). It is a restructuring and extension of the original analysis notebook, using Mesquita's
-[`friendly`](https://github.com/LSSTDESC/friendly) matching / ellipse / entropy code (see *Dependencies*).
+(for example visit-subset reruns). It is a restructuring and extension of the original analysis notebook, using the
+[`friendly`](https://github.com/LSSTDESC/friendly) package for the matching / ellipse / entropy code (see *Dependencies*).
 
 What it computes, for each LSST object: whether it is part of a group where several true galaxies fall on fewer LSST detections
 (unrecognized blend), and its blending entropy S_b, the entropy of the probabilities that it matches each overlapping true galaxy
@@ -49,7 +49,6 @@ pip install -e ".[test]"    # pytest
 ### Dependencies you must provide
 
 * **[`friendly`](https://github.com/LSSTDESC/friendly)** (matching, ellipses, graphs, entropy). Either `pip install` it, or point `FRIENDLY_PATH` to the directory that contains the package.
-  `my_blending_lib` is only needed for the slow reference EOT (`fast_eot: false`); set `BLENDING_LIB_PATH` if needed.
 * **LSST science pipelines + butler**, only for `prep` (the other stages run without them: source `loadLSST.bash`, no `setup`).
 * Euclid Q1 MER tile catalogs (`euclid_dir`) and the HST HLF catalog (`hst_file`); the defaults are the SLAC S3DF paths.
 
@@ -79,7 +78,7 @@ A *case* is a yaml file; unset fields take the defaults of `copaings/config.py`.
 | `euclid_region` | `auto` | all Euclid tiles over the LSST footprint; `notebook` = the 6 original tiles in a ~2.5 deg2 box |
 | `only_hst_field`, `sky_box` | off | crop Euclid to the HST field / crop everything to `[ra0, ra1, dec0, dec1]` |
 | `eot_dense_max` | 400 | FoF groups above this size use the KD-tree ellipse test; 0 = always |
-| `fast_eot`, `fast_sb_mc` | true | fast, validated replacements of friendly's slow code paths |
+| `fast_sb_mc` | true | fast, validated replacement of friendly's Monte Carlo overlap area |
 | `n_eot_tasks`, `n_sb_tasks` | 100 | slurm array sizes |
 | `setup_cmd`, `account`, `partition`, `mem`, `mem_fof`, `time_*`, `exclude_nodes` | | slurm settings; pin the LSST stack in `setup_cmd` |
 
@@ -110,7 +109,7 @@ tests/
 
 ## Credits
 
-Matching, ellipse and entropy machinery: Mesquita's [`friendly`](https://github.com/LSSTDESC/friendly) and `my_blending_lib` (not part of this repository; check their licence).
+Matching, ellipse and entropy machinery: the [`friendly`](https://github.com/LSSTDESC/friendly) package (not part of this repository; check its licence).
 
 ## References
 

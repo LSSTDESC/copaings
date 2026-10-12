@@ -1,4 +1,4 @@
-"""Fast ellipse overlap test (EOT): same result as my_blending_lib.ellipse_overlap_group, without the unused work.
+"""Fast ellipse overlap test (EOT): same result as friendly's graph-based test, without the unused work.
 
 friendly's group2graph builds a full graph per group (Monte Carlo overlap area on a 1000x1000 grid for every edge,
 purity, magnitudes, blending entropy) although the EOT only needs the connected components of the "ellipses

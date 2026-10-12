@@ -196,7 +196,7 @@ def eot(case, tel, task_id, n_tasks):
     Parameters
     ----------
     case : Case
-        Uses `fast_eot` and `eot_dense_max`.
+        Uses `eot_dense_max`.
     tel : {'Euclid', 'HST'}
     task_id : int
         Slice index (``SLURM_ARRAY_TASK_ID`` in an array job).
@@ -214,21 +214,12 @@ def eot(case, tel, task_id, n_tasks):
 
     groups = chunk(load(case.path('groups', f'{initial(tel)}_fof.pkl')), task_id, n_tasks)
     out = []
-    if case.fast_eot:
-        from .eot_fast import EllipseCache, split_group
-        cache = EllipseCache(lsst, true_cat)  # LSST ellipses for the whole catalog, computed once
-        for grp in tqdm(groups, desc=f'EOT(fast) {tel} {task_id}/{n_tasks}', file=sys.stderr):
-            for g in split_group(cache, grp, dense_max=case.eot_dense_max):
-                if len(g[0]) > 0 and len(g[1]) > 0:
-                    out.append(g)
-    else:
-        mbl = deps.mbl()  # imports the whole LSST stack, only needed for this slow reference path
-        # full catalogs are passed (friendly indexes them with the group indices; index == position after prep)
-        with _mute_stdout():
-            for grp in tqdm(groups, desc=f'EOT {tel} {task_id}/{n_tasks}', file=sys.stderr):
-                for g in mbl.ellipse_overlap_group(grp, true_cat, lsst):
-                    if len(g[0]) > 0 and len(g[1]) > 0:
-                        out.append(g)
+    from .eot_fast import EllipseCache, split_group
+    cache = EllipseCache(lsst, true_cat)  # LSST ellipses for the whole catalog, computed once
+    for grp in tqdm(groups, desc=f'EOT {tel} {task_id}/{n_tasks}', file=sys.stderr):
+        for g in split_group(cache, grp, dense_max=case.eot_dense_max):
+            if len(g[0]) > 0 and len(g[1]) > 0:
+                out.append(g)
     dump(out, case.path('groups', f'{initial(tel)}_eot_part_{task_id:04d}.pkl'))
 
 
