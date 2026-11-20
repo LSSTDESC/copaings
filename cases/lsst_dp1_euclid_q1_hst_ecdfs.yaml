@@ -1,0 +1,42 @@
+# LSST DP1 (ComCam) in the ECDFS field, against Euclid Q1 (MER) and HST (HLF GOODS-S).
+# The Euclid Q1 tiles that cover the LSST objects are found automatically.
+#
+# Run every stage and every standard plot on slurm, from the root of the copaings clone:
+#   python -m copaings submit cases/lsst_dp1_euclid_q1_hst_ecdfs.yaml
+#
+# Lines marked TODO are the ones you most likely need to change. Every field is described in the README
+# and in copaings/config.py.
+name: lsst_dp1_euclid_q1_hst_ecdfs
+out_root: ./copaings_runs          # TODO: full runs are large, put them on group or scratch space
+
+# --- LSST catalog (butler); '/repo/dp1' is the DP1 repository at USDF
+repo: /repo/dp1
+collections: LSSTComCam/DP1
+skymap: lsst_cells_v1
+dataset_type: object
+tracts: [4636, 4637, 4638, 4847, 4848, 4849, 4850, 5061, 5062, 5063, 5064, 5065, 5279, 5280, 5281, 5282]   # tracts without data are skipped
+common_frame_xy: true
+
+# --- true catalogs
+telescopes: [Euclid, HST]
+euclid_dir: /sdf/group/rubin/shared/euclid/q1/catalogs     # TODO outside USDF: folder of euclid_q1_mer_final_<tile>.fits
+euclid_region: auto                # Q1 tiles are named by healpix pixel: only the tiles over the LSST objects are read
+hst_catalog: hlf_goodss
+hst_file: /sdf/data/rubin/shared/hst/ecdfs/hlsp_hlf_hst_60mas_goodss_v2.1_catalog.fits   # TODO outside USDF
+# Optional: cut LSST, Euclid and HST to one circle [ra_center, dec_center, radius] (deg) so all surveys cover
+# the same area.
+# sky_circle: [53.13, -28.10, 0.7]
+
+# --- selection / matching
+linking_length: 3.0                # arcsec
+mag_cut: 35
+
+# --- parallelism (sizes of the slurm arrays)
+n_eot_tasks: 100
+n_sb_tasks: 100
+
+# --- slurm
+setup_cmd: "source /sdf/group/rubin/sw/w_latest/loadLSST.bash && setup lsst_distrib"
+partition: milano
+account: ""                        # TODO: your slurm account; list yours with: sacctmgr show assoc user=$USER format=account%30
+mem: 32G

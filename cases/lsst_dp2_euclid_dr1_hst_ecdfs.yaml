@@ -1,0 +1,46 @@
+# LSST DP2 in the ECDFS field, against Euclid DR1 (MER) and HST (HLF GOODS-S).
+# All three catalogs are cut to the same circle on the sky before matching.
+#
+# Run every stage and every standard plot on slurm, from the root of the copaings clone:
+#   python -m copaings submit cases/lsst_dp2_euclid_dr1_hst_ecdfs.yaml
+#
+# Lines marked TODO are the ones you most likely need to change. Every field is described in the README
+# and in copaings/config.py.
+name: lsst_dp2_euclid_dr1_hst_ecdfs
+out_root: ./copaings_runs          # TODO: full runs are large, put them on group or scratch space
+
+# --- LSST catalog (butler); 'dp2_prep' is the repository name at USDF
+repo: dp2_prep
+collections: LSSTCam/runs/DRP/DP2/v30_0_8/DM-55060/stage3
+skymap: lsst_cells_v2
+dataset_type: object
+tracts: [4636, 4637, 4638, 4847, 4848, 4849, 4850, 5061, 5062, 5063, 5064, 5065, 5279, 5280, 5281, 5282]
+common_frame_xy: true
+
+# --- true catalogs
+telescopes: [Euclid, HST]
+# TODO: folder of euclid_dr1_mer_final_<TILE_INDEX>.fits files. Make it with
+#   python scripts/download_euclid_dr1.py --output <folder>
+# (default: 1 deg around RA 53.13, Dec -28.10). At USDF a copy is readable by the rubin_users group:
+euclid_dir: /sdf/group/rubin/user/mesquita/euclid_dr1_ecdfs
+euclid_region: auto                # DR1 tiles are not named by healpix pixel: every file of euclid_dir is read
+hst_catalog: hlf_goodss
+hst_file: /sdf/data/rubin/shared/hst/ecdfs/hlsp_hlf_hst_60mas_goodss_v2.1_catalog.fits   # TODO outside USDF
+# [ra_center, dec_center, radius] (deg), applied to LSST, Euclid and HST before matching.
+# The Euclid download covers 1 deg around (53.13, -28.10), so Euclid fills only the inner part of this circle.
+sky_circle: [53.0, -28.15, 1.6]
+
+# --- selection / matching
+linking_length: 3.0                # arcsec
+mag_cut: 35
+
+# --- parallelism (sizes of the slurm arrays)
+n_eot_tasks: 100
+n_sb_tasks: 100
+
+# --- slurm
+setup_cmd: "source /sdf/group/rubin/sw/w_latest/loadLSST.bash && setup lsst_distrib"
+partition: milano
+account: ""                        # TODO: your slurm account; list yours with: sacctmgr show assoc user=$USER format=account%30
+mem: 32G
+mem_fof: 64G

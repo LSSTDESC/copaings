@@ -1,127 +1,150 @@
-"""Blending entropy per group, using friendly only (no LSST stack).
+"""Blending entropy S_b of the LSST objects, group by group, computed with `friendly`.
 
-The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158);
-the matching, ellipse and entropy code is the `friendly` package (https://github.com/LSSTDESC/friendly).
-Per-group graph and entropy computation of `friendly`, plus a guard against node-id collisions (see `_group_sb_remapped`).
+The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
+For one group, friendly builds a graph whose nodes are the true galaxies and the LSST objects and whose edges join
+overlapping ellipses. The entropy of an LSST object is the entropy of its probabilities to match each galaxy it
+overlaps (from the overlap areas and the magnitude differences).
 """
 import sys
-import warnings
 
+import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-import friendly.ellipses as ellipses  # deps.py puts friendly on sys.path
-import friendly.entropy as entropy
-import friendly.graphs as graphs
+from . import deps
+
+deps.add_friendly_to_path()
+import friendly.ellipses as ellipses  # noqa: E402
+import friendly.entropy as entropy  # noqa: E402
+import friendly.graphs as graphs  # noqa: E402
 
 
-def study_ellipses(grp, true_cat, obj_cat):
-    """Ellipse information and conic parameters of the objects of one group.
-
-    Parameters
-    ----------
-    grp : sequence
-        ``[true_indices, lsst_indices]``.
-    true_cat, obj_cat : pandas.DataFrame
-        True and LSST catalogs (full catalogs: friendly indexes them by row position).
-
-    Returns
-    -------
-    obj_infos, obj_param : pandas.DataFrame
-        Centre, axes, angle and conic parameters of the LSST objects.
-    gal_infos, gal_param : pandas.DataFrame
-        Same for the true objects.
-    """
-    obj_infos = ellipses.ellipse_infos(grp, true_cat, obj_cat, dc2_type='object')
-    obj_param = ellipses.ellipse_parameters(obj_infos)
-    gal_infos = ellipses.ellipse_infos(grp, true_cat, obj_cat, dc2_type='galaxy')
-    gal_param = ellipses.ellipse_parameters(gal_infos)
-    return obj_infos, obj_param, gal_infos, gal_param
-
-
-def _group_sb(group, true_cat, obs_cat, link_type):
+def group_sb(group, true_cat, obs_cat, link_type='ellipse'):
     """Blending entropy and purity of the LSST objects of one group.
 
     Parameters
     ----------
     group : sequence
-        ``[true_indices, lsst_indices]``.
-    true_cat, obs_cat : pandas.DataFrame
-        True and LSST catalogs.
-    link_type : str
-        ``'ellipse'`` (overlap of ellipses) or the Gaussian overlap definition of friendly.
+        ``[true_rows, lsst_rows]``: rows of the group members in the true and in the LSST catalog.
+    true_cat : pandas.DataFrame
+        True catalog with ``ra``, ``dec``, ``size_true``, ``size_minor_true``, ``position_angle_true`` and ``mag_i``.
+    obs_cat : pandas.DataFrame
+        LSST catalog with ``ra``, ``dec``, ``x``, ``y``, the i-band moments, ``psf_fwhm_i``, ``mag_i_cModel`` and
+        ``blendedness``.
+    link_type : str, default 'ellipse'
+        ``'ellipse'`` (overlap of ellipses) or anything else for friendly's Gaussian overlap.
 
     Returns
     -------
     dict
-        ``{lsst_row: (entropy, purity)}`` for the LSST objects of the group.
+        ``{lsst_row: (entropy, purity, flag)}`` for the LSST objects of the group. friendly gives -1 when the entropy
+        cannot be computed; here it becomes NaN and `flag` says why:
+
+        * ``'computed'``: entropy >= 0;
+        * ``'obj_only_neighbours'``: the object overlaps only LSST objects of the group, no galaxy;
+        * ``'zero_overlap'``: the object touches galaxies, but every overlap area is 0;
+        * ``'failed'``: friendly gave NaN (e.g. undefined ellipse or missing magnitude).
     """
-    obj_infos, obj_param, gal_infos, gal_param = study_ellipses(group, true_cat, obs_cat)
-    grp_infos = pd.merge(gal_infos.T, obj_infos.T, how='outer', left_index=True, right_index=True)
-    grp_infos = grp_infos.T[['x', 'y', 'a', 'b', 'theta']].T
-    grp_param = pd.merge(gal_param.T, obj_param.T, how='outer', left_index=True, right_index=True)
-    G = graphs.NetworkX_graph(group, true_cat, obs_cat, grp_infos, grp_param, link_type)
+    gal_infos = ellipses.ellipse_infos(group, true_cat, obs_cat, dc2_type='galaxy')
+    obj_infos = ellipses.ellipse_infos(group, true_cat, obs_cat, dc2_type='object')
+    gal_params = ellipses.ellipse_parameters(gal_infos)
+    obj_params = ellipses.ellipse_parameters(obj_infos)
+
+    # friendly wants one column per graph node (x, y, a, b, theta and A..F in rows)
+    infos = pd.concat([gal_infos, obj_infos]).T
+    params = pd.concat([gal_params, obj_params]).T
+
+    G = graphs.NetworkX_graph(group, true_cat, obs_cat, infos, params, link_type)
     entropy.blending_entropy(G)
-    return {idx: (data['blending_entropy'], data['purity']) for idx, data in G.nodes(data=True)
-            if data.get('galaxy') is False}  # belongs to obs_cat
+
+    result = {}
+    for node, data in G.nodes(data=True):
+        if data['galaxy']:
+            continue
+        # an LSST object
+        s = data['blending_entropy']
+        if s == -1:
+            touches_galaxy = any(G.nodes[c]['galaxy'] for c in G.adj[node])
+            flag = 'zero_overlap' if touches_galaxy else 'obj_only_neighbours'
+            s = np.nan
+        elif np.isfinite(s):
+            flag = 'computed'
+        else:
+            flag = 'failed'
+        result[node] = (s, data['purity'], flag)
+    return result
 
 
-def _group_sb_remapped(group, true_cat, obs_cat, link_type):
-    """Blending entropy and purity of a group where a true and an LSST object have the same row number.
+def group_sb_renumbered(group, true_cat, obs_cat, link_type='ellipse'):
+    """Same as `group_sb`, for a group where a true galaxy and an LSST object have the same row number.
 
-    friendly uses the row number of an object both as its graph node id and as its position in its catalog, so the
-    two collide and ``param[i]`` raises KeyError. The group is evaluated on small sub-catalogs where the LSST objects
-    are numbered 0..n_o-1 and the true objects n_o.. (dummy rows pad the start of the true catalog), and the results
-    are mapped back to the real LSST rows.
+    friendly uses the row number of a source as its node name in the graph, for both catalogs. If galaxy 3 and LSST
+    object 3 are in the same group, they would become one node. So the group is copied into two small catalogs where
+    the row numbers cannot collide:
+
+    * LSST sub-catalog: the n_obs LSST objects of the group, rows ``0 .. n_obs-1``;
+    * true sub-catalog: n_obs filler rows (never used), then the galaxies of the group, rows ``n_obs ..``.
+
+    The results are then given back with the real LSST row numbers.
 
     Parameters
     ----------
-    group : sequence
-        ``[true_indices, lsst_indices]``.
-    true_cat, obs_cat : pandas.DataFrame
-    link_type : str
+    group, true_cat, obs_cat, link_type
+        See `group_sb`.
 
     Returns
     -------
     dict
-        ``{lsst_row: (entropy, purity)}``.
+        ``{lsst_row: (entropy, purity, flag)}``, with the rows of the full LSST catalog.
     """
-    idx_t, idx_o = list(group[0]), list(group[1])
-    n_o = len(idx_o)
-    obs_sub = obs_cat.iloc[idx_o].reset_index(drop=True)
-    true_sub = pd.concat([true_cat.iloc[[0] * n_o], true_cat.iloc[idx_t]], ignore_index=True)
-    res = _group_sb([list(range(n_o, n_o + len(idx_t))), list(range(n_o))], true_sub, obs_sub, link_type)
-    return {idx_o[k]: v for k, v in res.items()}
+    true_rows, lsst_rows = list(group[0]), list(group[1])
+    n_obs = len(lsst_rows)
+
+    obs_sub = obs_cat.iloc[lsst_rows].reset_index(drop=True)
+    filler = true_cat.iloc[[0] * n_obs]
+    true_sub = pd.concat([filler, true_cat.iloc[true_rows]], ignore_index=True)
+
+    new_group = [list(range(n_obs, n_obs + len(true_rows))), list(range(n_obs))]
+    result = group_sb(new_group, true_sub, obs_sub, link_type)
+    return {lsst_rows[k]: value for k, value in result.items()}
 
 
-def compute_Sb(groups, true_cat, obs_cat, link_type='ellipse', Sb_col_name_in_obs_cat='blending_entropy'):
+def compute_Sb(groups, true_cat, obs_cat, link_type='ellipse', Sb_col_name_in_obs_cat='blending_entropy',
+               flag_col_name_in_obs_cat='sb_flag'):
     """Blending entropy and purity of the LSST objects of a list of groups.
-
-    Needs only friendly (no LSST stack); a guard handles node id collisions.
 
     Parameters
     ----------
     groups : list
-        Groups ``[true_indices, lsst_indices]``.
+        Groups ``[true_rows, lsst_rows]``.
     true_cat : pandas.DataFrame
-        True catalog with ``mag_i``.
+        True catalog (see `group_sb`).
     obs_cat : pandas.DataFrame
-        LSST catalog with ``mag_i_cModel`` (magnitude in the band of the true catalog) and ``blendedness``. Modified in
-        place.
+        LSST catalog (see `group_sb`). Modified in place: the entropy goes to the column `Sb_col_name_in_obs_cat`,
+        the purity to the column ``purity`` and the flag (see `group_sb`) to `flag_col_name_in_obs_cat`.
     link_type : str, default 'ellipse'
-        Overlap definition: ``'ellipse'`` or friendly's Gaussian overlap.
+        Overlap definition, see `group_sb`.
     Sb_col_name_in_obs_cat : str, default 'blending_entropy'
-        Column of `obs_cat` that receives the entropy; the purity goes to the column ``purity``.
-
-    Notes
-    -----
-    The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
+        Column of `obs_cat` that receives the entropy.
+    flag_col_name_in_obs_cat : str, default 'sb_flag'
+        Column of `obs_cat` that receives the flag.
     """
-    warnings.filterwarnings('ignore', category=FutureWarning)
-    warnings.filterwarnings('ignore', category=RuntimeWarning)
-    for group in tqdm(groups, file=sys.stderr):
-        collide = bool(set(group[0]) & set(group[1]))
-        res = (_group_sb_remapped if collide else _group_sb)(group, true_cat, obs_cat, link_type)
-        for idx, (ent, pur) in res.items():
-            obs_cat.loc[idx, Sb_col_name_in_obs_cat] = ent
-            obs_cat.loc[idx, 'purity'] = pur
+    rows, sb, purity, flags = [], [], [], []
+    with np.errstate(invalid='ignore', divide='ignore'):  # undefined ellipses (NaN moments) give NaN, not an error
+        for group in tqdm(groups, file=sys.stderr):
+            if set(group[0]) & set(group[1]):
+                result = group_sb_renumbered(group, true_cat, obs_cat, link_type)
+            else:
+                result = group_sb(group, true_cat, obs_cat, link_type)
+            for row, (s, p, flag) in result.items():
+                rows.append(row)
+                sb.append(s)
+                purity.append(p)
+                flags.append(flag)
+
+    if flag_col_name_in_obs_cat not in obs_cat:
+        obs_cat[flag_col_name_in_obs_cat] = None
+    obs_cat[flag_col_name_in_obs_cat] = obs_cat[flag_col_name_in_obs_cat].astype(object)
+    obs_cat.loc[rows, Sb_col_name_in_obs_cat] = sb
+    obs_cat.loc[rows, 'purity'] = purity
+    obs_cat.loc[rows, flag_col_name_in_obs_cat] = flags

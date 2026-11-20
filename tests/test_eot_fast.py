@@ -3,10 +3,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from copaings import deps  # noqa: F401  (puts `friendly` on sys.path)
+from copaings import deps
 
-pytest.importorskip('friendly')
-from copaings.eot_fast import EllipseCache, _candidate_pairs, split_group  # noqa: E402
+deps.add_friendly_to_path()
+from copaings.eot_fast import EllipseCache, candidate_pairs, split_group  # noqa: E402
 
 PS = 0.2
 RA0, DEC0 = 53.1, -28.0
@@ -50,12 +50,12 @@ def test_kd_path_matches_all_pairs():
         assert _canon(dense) == _canon(kd)
 
 
-def test_candidate_pairs_contain_every_overlap():
+def testcandidate_pairs_contain_every_overlap():
     rng = np.random.default_rng(2)
     n = 400
     x, y = rng.uniform(0, 200, n), rng.uniform(0, 200, n)
     r = np.where(rng.random(n) < 0.1, rng.uniform(10, 40, n), rng.uniform(1, 6, n))  # a few large ellipses
-    i, j = _candidate_pairs(x, y, r)
+    i, j = candidate_pairs(x, y, r)
     got = {tuple(sorted(p)) for p in zip(i.tolist(), j.tolist())}
     iu, ju = np.triu_indices(n, 1)
     want = {(a, b) for a, b in zip(iu.tolist(), ju.tolist()) if np.hypot(x[a] - x[b], y[a] - y[b]) <= r[a] + r[b]}

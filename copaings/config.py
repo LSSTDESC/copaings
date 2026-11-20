@@ -32,7 +32,9 @@ DEFAULT_LSST_COLUMNS = {
     'g_blendedness': 'g_blendedness',
 }
 
-_REMOVED_KEYS = ('fast_eot',)  # the slow reference overlap test was removed; the fast one is the only one
+# Options that no longer exist, ignored so that old case files still load. fast_eot: the slow overlap test was
+# removed; fast_sb_mc: the fast Monte Carlo overlap area is now part of friendly.
+_REMOVED_KEYS = ('fast_eot', 'fast_sb_mc')
 
 TELESCOPES = ('Euclid', 'HST')  # name of the "true" catalogs; initial is used in file names
 
@@ -64,24 +66,35 @@ class Case:
         Rebuild the LSST pixel positions ``x``, ``y`` in one tangent plane from ra/dec (per-tract pixel frames are
         not consistent across tracts). The butler values are kept as ``x_tract``, ``y_tract`` when they exist.
     euclid_dir, hst_file : str
-        Directory of the Euclid Q1 MER tile catalogs and path of the HST catalog fits file.
+        Folder of the Euclid MER tile catalogs, files ``euclid_<release>_mer_final_<tile>.fits`` (Q1 or DR1, one
+        release per folder), and path of the HST catalog fits file.
+    hst_catalog : {'hlf_goodss', 'cosmos_acs'}, default 'hlf_goodss'
+        Format of `hst_file`: the HLF GOODS-S catalog (ECDFS, fits) or the COSMOS ACS F814W catalog of Leauthaud et
+        al. 2007 (``cosmos_acs_iphot_200709.parq``).
+    hst_footprint_radius : float, default 5.0
+        An LSST object is in the HST footprint if an HST galaxy lies within this distance [arcsec]. The HST fields
+        are jagged and their convex hull includes sky with no HST data; 0 uses the convex hull anyway.
     only_hst_field : bool, default False
         Crop the Euclid catalog to the bounding box of the HST catalog.
     sky_box : list of float, default []
         Optional ``[ra_min, ra_max, dec_min, dec_max]`` [deg] applied to all three catalogs (tests, demos).
-    euclid_region : {'auto', 'notebook'}, default 'auto'
-        ``'auto'`` reads every Euclid tile that has a file and contains LSST objects; ``'notebook'`` reads the six
-        hand-picked ECDFS tiles cropped to a box of about 2.5 deg2 (first version of the analysis).
+    sky_circle : list of float, default []
+        Optional ``[ra_center, dec_center, radius]`` [deg] applied to all three catalogs, so that every survey
+        covers the same area (exact great-circle distance).
+    euclid_region : {'auto', 'all', 'notebook'}, default 'auto'
+        ``'auto'`` reads every Euclid tile that has a file and contains LSST objects when the files are named by
+        healpix pixel (Q1), and every file of `euclid_dir` otherwise (DR1, named by TILE_INDEX); ``'all'`` reads every
+        file of `euclid_dir`; ``'notebook'`` reads the six hand-picked ECDFS Q1 tiles cropped to a box of about
+        2.5 deg2 (first version of the analysis).
     linking_length : float, default 2.0
         Friends-of-friends linking length [arcsec].
     mag_cut : float, default 35.0
         Objects fainter than this (own band) are removed from the three catalogs.
     telescopes : list of str
+        Subset of ``['Euclid', 'HST']``; e.g. ``['HST']`` for a field without Euclid data (COSMOS).
         Names of the "true" catalogs to process.
     eot_dense_max : int, default 400
         FoF groups with more members than this use the KD-tree pair search in the fast overlap test (0 = always).
-    fast_sb_mc : bool, default True
-        Use `copaings.mc_fast` for friendly's Monte Carlo overlap area (identical results, faster).
     n_eot_tasks, n_sb_tasks : int, default 100
         Sizes of the slurm arrays of the `eot` and `sb` stages.
     setup_cmd : str
@@ -120,11 +133,20 @@ class Case:
     # --- external catalogs
     euclid_dir: str = '/sdf/group/rubin/shared/euclid/q1/catalogs'
     hst_file: str = '/sdf/data/rubin/shared/hst/ecdfs/hlsp_hlf_hst_60mas_goodss_v2.1_catalog.fits'
+    # Format of hst_file: 'hlf_goodss' (ECDFS) or 'cosmos_acs' (COSMOS ACS F814W, Leauthaud+07)
+    hst_catalog: str = 'hlf_goodss'
+    # HST footprint: an LSST object is in it if an HST galaxy lies within this distance [arcsec]. HST fields are jagged,
+    # so their convex hull includes sky with no HST data. 0 = convex hull, like Euclid.
+    hst_footprint_radius: float = 5.0
     only_hst_field: bool = False
     # Optional [ra_min, ra_max, dec_min, dec_max] (deg): keep only this part of the sky in all three catalogs.
     # Handy for tests and demos (a whole pipeline run in minutes). Empty = no cut.
     sky_box: list = field(default_factory=list)
-    # Which Euclid tiles to read: 'auto' = all tiles with a file that contain LSST objects (no crop),
+    # Optional [ra_center, dec_center, radius] (deg): keep only the objects within this circle in all three catalogs,
+    # so that LSST, Euclid and HST cover one homogeneous area. Empty = no cut.
+    sky_circle: list = field(default_factory=list)
+    # Which Euclid tiles to read: 'auto' = all tiles with a file that contain LSST objects (no crop) for Q1
+    # healpix-named files, every file of euclid_dir otherwise (DR1); 'all' = every file of euclid_dir;
     # 'notebook' = the six hand-picked ECDFS tiles cropped to a ~2.5 deg2 box (first version of this code).
     euclid_region: str = 'auto'
 
@@ -137,8 +159,6 @@ class Case:
     # overlapping with the whole group, like friendly); bigger groups use a KD-tree where it only links to neighbours
     # within a few arcsec. 0 = always the KD-tree path (consistent across linking lengths, used by the FoF-length tests).
     eot_dense_max: int = 400
-    # Use copaings.mc_fast for friendly's overlap-area Monte Carlo (bit-identical results, ~3x faster sb stage).
-    fast_sb_mc: bool = True
 
     # --- parallelism
     n_eot_tasks: int = 100
@@ -156,6 +176,15 @@ class Case:
     mem_fof: str = ''  # FoF holds LSST + Euclid catalogs and a KD-tree in one process; default = mem
     time_short: str = '01:00:00'
     time_long: str = '12:00:00'
+
+    def __post_init__(self):
+        """Check the options that later stages rely on."""
+        unknown = [t for t in self.telescopes if t not in TELESCOPES]
+        if unknown or not self.telescopes:
+            raise ValueError(f'telescopes must be a non-empty subset of {list(TELESCOPES)}, got {self.telescopes}')
+        self.telescopes = [t for t in TELESCOPES if t in self.telescopes]  # fixed order: Euclid, HST
+        if self.hst_catalog not in ('hlf_goodss', 'cosmos_acs'):
+            raise ValueError(f"hst_catalog must be 'hlf_goodss' or 'cosmos_acs', got {self.hst_catalog!r}")
 
     @classmethod
     def from_yaml(cls, path):
@@ -218,7 +247,9 @@ class Case:
         dict
             ``{internal_name: butler_name}``: `DEFAULT_LSST_COLUMNS` updated with `lsst_columns`.
         """
-        return {**DEFAULT_LSST_COLUMNS, **self.lsst_columns}
+        columns = dict(DEFAULT_LSST_COLUMNS)
+        columns.update(self.lsst_columns)
+        return columns
 
     @property
     def out_dir(self):

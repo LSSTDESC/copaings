@@ -1,0 +1,40 @@
+# LSST DP2 in the COSMOS field, against HST (ACS F814W catalog of Leauthaud et al. 2007). No Euclid data here.
+# LSST is cut to the box of the ACS field.
+#
+# Run every stage and every standard plot on slurm, from the root of the copaings clone:
+#   python -m copaings submit cases/lsst_dp2_hst_cosmos.yaml
+#
+# Lines marked TODO are the ones you most likely need to change. Every field is described in the README
+# and in copaings/config.py.
+name: lsst_dp2_hst_cosmos
+out_root: ./copaings_runs          # TODO: full runs are large, put them on group or scratch space
+
+# --- LSST catalog (butler); 'dp2_prep' is the repository name at USDF
+repo: dp2_prep
+collections: LSSTCam/runs/DRP/DP2/v30_0_8/DM-55060/stage3
+skymap: lsst_cells_v2
+dataset_type: object
+tracts: [9569, 9570, 9571, 9812, 9813, 9814, 10054, 10055, 10056]   # DP2 tracts around COSMOS
+common_frame_xy: true
+
+# --- true catalog: HST only
+telescopes: [HST]
+hst_catalog: cosmos_acs            # galaxies (mu_class == 1), MAG_AUTO, sizes and angle from the world columns
+hst_file: /sdf/data/rubin/shared/hst/cosmos/catalogs/cosmos_acs_iphot_200709.parq   # TODO outside USDF
+# [ra_min, ra_max, dec_min, dec_max] (deg): the ACS field (RA 149.43-150.80, Dec 1.57-2.89) plus a small margin
+sky_box: [149.40, 150.83, 1.55, 2.91]
+
+# --- selection / matching
+linking_length: 3.0                # arcsec
+mag_cut: 35
+
+# --- parallelism (sizes of the slurm arrays)
+n_eot_tasks: 100
+n_sb_tasks: 100
+
+# --- slurm
+setup_cmd: "source /sdf/group/rubin/sw/w_latest/loadLSST.bash && setup lsst_distrib"
+partition: milano
+account: ""                        # TODO: your slurm account; list yours with: sacctmgr show assoc user=$USER format=account%30
+mem: 32G
+mem_fof: 64G
