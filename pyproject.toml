@@ -23,6 +23,7 @@ friendly = "https://github.com/LSSTDESC/friendly"
 [project.optional-dependencies]
 test = ["pytest"]
 notebook = ["jupyter", "nbformat"]
+download = ["pyvo", "requests"]   # scripts/download_euclid_dr1.py
 
 [project.scripts]
 copaings = "copaings.cli:main"

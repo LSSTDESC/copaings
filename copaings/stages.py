@@ -10,7 +10,6 @@ Layout:
   lsst_sb.parquet                                     <- sb_merge
   plots/                                              <- plots
 """
-import contextlib
 import json
 import os
 import pickle
@@ -21,8 +20,8 @@ import numpy as np
 import pandas as pd
 from tqdm import tqdm
 
-from . import catalogs, deps
-from .config import TELESCOPES, TRUE_MAG_COL, TRUE_MAG_COL_IN_LSST, TRUE_MAGERR_COL, initial
+from . import catalogs, color_fit, deps
+from .config import TRUE_MAG_COL, TRUE_MAG_COL_IN_LSST, TRUE_MAGERR_COL, initial
 
 
 # ----------------------------------------------------------------------------- io helpers
@@ -56,10 +55,10 @@ def load_cats(case, lsst_name='lsst'):
     -------
     lsst : pandas.DataFrame
     trues : dict of pandas.DataFrame
-        ``{'Euclid': ..., 'HST': ...}``.
+        ``{survey: catalog}`` for the surveys of `case.telescopes`.
     """
     lsst = read_cat(case, lsst_name)
-    return lsst, {'Euclid': read_cat(case, 'euclid'), 'HST': read_cat(case, 'hst')}
+    return lsst, {t: read_cat(case, t.lower()) for t in case.telescopes}
 
 
 def dump(obj, path):
@@ -116,21 +115,8 @@ def chunk(seq, task_id, n_tasks):
 
 
 def _quiet():
-    """Silence the FutureWarning and RuntimeWarning that friendly and pandas emit for every group."""
-    warnings.filterwarnings('ignore', category=FutureWarning)
+    """Silence the RuntimeWarnings (NaN moments, divisions by zero) that would otherwise be printed for many groups."""
     warnings.filterwarnings('ignore', category=RuntimeWarning)
-
-
-def _mute_stdout():
-    """Context manager that discards standard output.
-
-    friendly's ``ellipse_infos`` prints a debug line for every call; this keeps those lines out of the slurm logs.
-
-    Returns
-    -------
-    contextlib.AbstractContextManager
-    """
-    return contextlib.redirect_stdout(open(os.devnull, 'w'))
 
 
 # ----------------------------------------------------------------------------- prep
@@ -145,15 +131,32 @@ def prep(case):
 
     Notes
     -----
-    Writes ``catalogs/{lsst,euclid,hst}.parquet`` and ``catalogs/meta.json``. Group indices in every later stage are row
+    Writes ``catalogs/lsst.parquet`` and ``catalogs/<survey>.parquet`` for each survey of `telescopes`, ``catalogs/meta.json`` and ``catalogs/lsst_all_radec.parquet`` (LSST
+    positions before the sky cuts, used by the sky maps). Group indices in every later stage are row
     positions in these files.
     """
-    lsst, euclid, hst, meta = catalogs.assemble(case)
+    lsst, trues, meta, lsst_all = catalogs.assemble(case)
+    lsst_all.to_parquet(case.path('catalogs', 'lsst_all_radec.parquet'))  # whole footprint, for the sky maps
     lsst.to_parquet(case.path('catalogs', 'lsst.parquet'))
-    euclid.to_parquet(case.path('catalogs', 'euclid.parquet'))
-    hst.to_parquet(case.path('catalogs', 'hst.parquet'))
+    for tel, df in trues.items():
+        df.to_parquet(case.path('catalogs', f'{tel.lower()}.parquet'))
     catalogs.save_meta(case.path('catalogs', 'meta.json'), meta)
     print(json.dumps(meta, indent=2))
+
+
+def lsst_footprint(case):
+    """Stage `footprint`: write ``catalogs/lsst_all_radec.parquet`` (all LSST galaxy positions, before the sky cuts).
+
+    `prep` already writes it; this stage makes it for runs prepared before, reading only ra, dec and i-extendedness
+    from the butler (needs the full LSST stack).
+
+    Parameters
+    ----------
+    case : Case
+    """
+    df = catalogs.lsst_all_radec(case)
+    df.to_parquet(case.path('catalogs', 'lsst_all_radec.parquet'))
+    print(f'{len(df):,} LSST positions written')
 
 
 # ----------------------------------------------------------------------------- FoF
@@ -171,8 +174,11 @@ def fof(case, tel):
     Writes ``groups/<E|H>_fof.pkl``, a list of ``[true_indices, lsst_indices]`` that keeps only groups with at least one
     object of each catalog, and ``groups/<E|H>_fof_stats.json`` (number of groups and how many span several tracts).
     """
+    deps.add_friendly_to_path()
+    from friendly.matching import FoF_matching
+
     lsst, trues = load_cats(case)
-    groups = deps.matching().FoF_matching(trues[tel], lsst, case.linking_length)  # slow, single process
+    groups = FoF_matching(trues[tel], lsst, case.linking_length)
     groups = [g for g in groups if len(g[0]) > 0 and len(g[1]) > 0]  # no true-only / obs-only groups
     dump(groups, case.path('groups', f'{initial(tel)}_fof.pkl'))
 
@@ -207,18 +213,17 @@ def eot(case, tel, task_id, n_tasks):
     -----
     Writes ``groups/<E|H>_eot_part_<task_id>.pkl``.
     """
+    from .eot_fast import EllipseCache, split_group
+
     _quiet()
     lsst, trues = load_cats(case)
-    true_cat = trues[tel]
-    lsst['mag_i_cModel'] = lsst['i_cModel_mag']
-
     groups = chunk(load(case.path('groups', f'{initial(tel)}_fof.pkl')), task_id, n_tasks)
+
+    cache = EllipseCache(lsst, trues[tel], pixel_scale=case.lsst_pixel_scale)  # LSST ellipses, computed once
     out = []
-    from .eot_fast import EllipseCache, split_group
-    cache = EllipseCache(lsst, true_cat)  # LSST ellipses for the whole catalog, computed once
     for grp in tqdm(groups, desc=f'EOT {tel} {task_id}/{n_tasks}', file=sys.stderr):
         for g in split_group(cache, grp, dense_max=case.eot_dense_max):
-            if len(g[0]) > 0 and len(g[1]) > 0:
+            if len(g[0]) > 0 and len(g[1]) > 0:  # keep groups with at least one true and one LSST object
                 out.append(g)
     dump(out, case.path('groups', f'{initial(tel)}_eot_part_{task_id:04d}.pkl'))
 
@@ -246,7 +251,9 @@ def eot_merge(case, tel, n_tasks):
     missing = [p for p in parts if not os.path.exists(p)]
     if missing:
         raise FileNotFoundError(f'{len(missing)} EOT parts missing, e.g. {missing[0]}')
-    merged = [g for p in parts for g in load(p)]
+    merged = []
+    for p in parts:
+        merged.extend(load(p))
     meta = {'linking_length': case.linking_length, 'tel_name': tel, 'case': case.name}
     # same format as the pickles saved from the notebook: {"data", "metadata"}
     dump({'data': merged, 'metadata': meta}, case.path('groups', f'{initial(tel)}_no_overlap.pkl'))
@@ -298,10 +305,21 @@ def _pairs_11(groups):
     Returns
     -------
     true_idx, lsst_idx : numpy.ndarray of int
-        Catalog rows of the true and of the LSST object of each 1-1 group.
+        Catalog rows of the true and of the LSST object of each 1-1 group, sorted by LSST row. The order matters:
+        the magnitude trees hold out a random part of their training set, so sorting makes `magfit` independent of
+        the order of the groups.
     """
-    g11 = [g for g in groups if len(g[0]) == 1 and len(g[1]) == 1]
-    return (np.array([g[0][0] for g in g11], dtype=int), np.array([g[1][0] for g in g11], dtype=int))
+    true_idx = []
+    lsst_idx = []
+    for g in groups:
+        if len(g[0]) == 1 and len(g[1]) == 1:
+            true_idx.append(g[0][0])
+            lsst_idx.append(g[1][0])
+    true_idx = np.array(true_idx, dtype=int)
+    lsst_idx = np.array(lsst_idx, dtype=int)
+
+    order = np.argsort(lsst_idx)
+    return true_idx[order], lsst_idx[order]
 
 
 BANDS = 'ugrizy'
@@ -397,7 +415,7 @@ def _fit_tree(X, y, ra, dec, block):
 
 
 def magfit(case):
-    """Stage `magfit`: magnitudes of all LSST objects in the Euclid VIS and HST F814 bands.
+    """Stage `magfit`: magnitudes of all LSST objects in the Euclid VIS and HST F814 bands (surveys of the case).
 
     For each survey a gradient-boosted tree is trained on the 1-1 groups to predict the survey magnitude from the LSST
     ugrizy colours and size information (see `_tree_features`); it is then applied to every LSST object. Objects
@@ -419,7 +437,7 @@ def magfit(case):
     X_all, names = _tree_features(lsst, case.lsst_pixel_scale)
     params = {'tree_features': names, 'tree_params': TREE_PARAMS, 'tree_metrics': {}}
 
-    for tel in TELESCOPES:
+    for tel in case.telescopes:
         ti, li = _pairs_11(load_groups(case, tel))
         y = _f64(trues[tel][TRUE_MAG_COL[tel]].values[ti])
         ok = np.isfinite(y)
@@ -427,8 +445,15 @@ def magfit(case):
         block = 0.5 if len(y) > 200_000 else 0.03  # HST sits in one small field
         cols = _usable_columns(X_all[li])
         if len(cols) < len(names):
-            print(f'{tel}: features dropped (all-NaN or constant in the training pairs): {[n for j, n in enumerate(names) if j not in cols]}')
-        model, metrics = _fit_tree(X_all[li][:, cols], y, _f64(lsst['ra'].values[li]), _f64(lsst['dec'].values[li]), block)
+            dropped = []
+            for j in range(len(names)):
+                if j not in cols:
+                    dropped.append(names[j])
+            print(f'{tel}: features dropped (all-NaN or constant in the training pairs): {dropped}')
+        X_train = X_all[li][:, cols]
+        ra_train = _f64(lsst['ra'].values[li])
+        dec_train = _f64(lsst['dec'].values[li])
+        model, metrics = _fit_tree(X_train, y, ra_train, dec_train, block)
         col = TRUE_MAG_COL_IN_LSST[tel]
         pred = model.predict(X_all[:, cols])
         pred[~np.isfinite(X_all[:, 0])] = np.nan  # no i-band magnitude, no prediction
@@ -440,16 +465,44 @@ def magfit(case):
         print(tel, metrics, flush=True)
 
     # --- true-mag -> LSST i linear relations (used only for the magnitude histograms in the plots)
-    for tel in TELESCOPES:
+    for tel in case.telescopes:
         ti, li = _pairs_11(load_groups(case, tel))
         x = _f64(trues[tel][TRUE_MAG_COL[tel]].values[ti])
         y = _f64(lsst['i_cModel_mag'].values[li])
         ok = np.isfinite(x) & np.isfinite(y)
         params[f'{tel.lower()}_to_i'] = np.polyfit(x[ok], y[ok], deg=1).tolist()  # [slope, intercept]
 
+    # --- analytic fits of the survey magnitudes from the LSST bands (stored, see color_fit.load_color_fit)
+    params['color_fit'] = {tel: color_fit.fit_case(case, tel, lsst, trues[tel], load_groups(case, tel))
+                           for tel in case.telescopes}
+
     lsst.to_parquet(case.path('catalogs', 'lsst_fit.parquet'))
     with open(case.path('catalogs', 'fit_params.json'), 'w') as f:
         json.dump(params, f, indent=2)
+
+
+def colorfit(case):
+    """Stage `colorfit`: fit the survey magnitudes from the LSST bands and store them in ``fit_params.json``.
+
+    `magfit` already does it; this stage adds (or refreshes) the ``color_fit`` entry of runs made before, from the
+    saved catalogs and 1-1 groups only. The fits are printed in the notebook style.
+
+    Parameters
+    ----------
+    case : Case
+    """
+    path = case.path('catalogs', 'fit_params.json')
+    params = {}
+    if os.path.exists(path):
+        with open(path) as f:
+            params = json.load(f)
+    lsst, trues = load_cats(case)
+    params['color_fit'] = {tel: color_fit.fit_case(case, tel, lsst, trues[tel], load_groups(case, tel))
+                           for tel in case.telescopes}
+    with open(path, 'w') as f:
+        json.dump(params, f, indent=2)
+    for fit in params['color_fit'].values():
+        print(color_fit.format_fit(fit), end='\n\n')
 
 
 # ----------------------------------------------------------------------------- blending entropy
@@ -477,7 +530,6 @@ def sb(case, tel, task_id, n_tasks):
     Parameters
     ----------
     case : Case
-        Uses `fast_sb_mc`.
     tel : {'Euclid', 'HST'}
     task_id : int
         Slice index (``SLURM_ARRAY_TASK_ID`` in an array job).
@@ -486,38 +538,51 @@ def sb(case, tel, task_id, n_tasks):
 
     Notes
     -----
-    Writes ``sb/<E|H>_part_<task_id>.parquet``, indexed by LSST row, with columns ``blending_entropy_<tel>`` and
-    ``purity_<tel>``. The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
+    Writes ``sb/<E|H>_part_<task_id>.parquet``, indexed by LSST row, with columns ``blending_entropy_<tel>``,
+    ``purity_<tel>`` and ``sb_flag_<tel>`` (see `sb_merge`), for every LSST object of the slice's groups.
+    The blending entropy is described, used and tested in arXiv:2609.12158 (https://arxiv.org/abs/2609.12158).
     """
-    _quiet()
     from .sb_core import compute_Sb
-    if case.fast_sb_mc:
-        from . import mc_fast
-        mc_fast.install()
+
+    _quiet()
     lsst, trues = load_cats(case, 'lsst_fit')
-    lsst['mag_i_cModel'] = lsst[TRUE_MAG_COL_IN_LSST[tel]]
-    col = f'blending_entropy_{tel}'
+    lsst['mag_i_cModel'] = lsst[TRUE_MAG_COL_IN_LSST[tel]]  # friendly compares magnitudes in the band of the true catalog
+    col, fcol = f'blending_entropy_{tel}', f'sb_flag_{tel}'
     lsst[col] = np.nan
     lsst['purity'] = np.nan
+    lsst[fcol] = None
 
     groups = chunk(_groups_without_11(load_groups(case, tel)), task_id, n_tasks)
-    with _mute_stdout():
-        compute_Sb(groups, trues[tel], lsst, Sb_col_name_in_obs_cat=col)  # fills `col` and `purity` in place
+    # fills `col`, `purity` and `fcol` in place
+    compute_Sb(groups, trues[tel], lsst, Sb_col_name_in_obs_cat=col, flag_col_name_in_obs_cat=fcol)
 
-    part = lsst.loc[lsst[col].notna(), [col, 'purity']].rename(columns={'purity': f'purity_{tel}'})
+    # keep every object of the groups (the flag is set for all of them, the entropy can be NaN)
+    part = lsst.loc[lsst[fcol].notna(), [col, 'purity', fcol]].rename(columns={'purity': f'purity_{tel}'})
     part.to_parquet(case.path('sb', f'{initial(tel)}_part_{task_id:04d}.parquet'))
 
 
 def sb_merge(case, n_tasks):
     """Stage `sb_merge`: assemble the entropy and purity of every LSST object.
 
-    Conventions of ``blending_entropy_<tel>`` (and ``purity_<tel>``):
+    ``blending_entropy_<tel>`` is a number only where the entropy is defined, NaN elsewhere. The column
+    ``sb_flag_<tel>`` says which case each object is in:
 
-    * ``>= 0``: entropy computed by `sb`, for objects in a group other than 1-1;
-    * ``0`` (purity 1): the object is in a 1-1 group after the overlap test, a single candidate;
-    * ``-1`` (purity -1): the object overlaps no galaxy of that survey (outside the survey, no neighbour or no ellipse
-      overlap); friendly also uses -1 for objects whose neighbours are all LSST objects;
-    * NaN: only if something failed (for example a missing magnitude); counted and reported as a warning.
+    ==========================  =========  ==========================================================================
+    ``sb_flag_<tel>``           S_b        meaning
+    ==========================  =========  ==========================================================================
+    ``'computed'``              ``>= 0``   entropy computed by `sb` (group other than 1-1)
+    ``'one_to_one'``            ``0``      1-1 group after the overlap test, a single candidate (purity 1)
+    ``'out_footprint'``         NaN        outside the footprint of the survey (``in_<survey>_footprint`` False)
+    ``'no_fof_match'``          NaN        in the footprint, no galaxy of the survey within the FoF linking length
+    ``'no_ellipse_overlap'``    NaN        in a FoF group, but its ellipse overlaps no galaxy (dropped by `eot`)
+    ``'obj_only_neighbours'``   NaN        in a group, but overlaps only other LSST objects, no galaxy
+    ``'zero_overlap'``          NaN        in a group, touches galaxies but every overlap area is 0
+    ``'failed'``                NaN        in a group, computation failed (e.g. missing magnitude); reported as a warning
+    ==========================  =========  ==========================================================================
+
+    ``purity_<tel>`` is NaN for the objects in no group (the first three NaN cases).
+
+    Parts written before the flag existed are read too: their -1 values become NaN with ``'obj_only_neighbours'``.
 
     Parameters
     ----------
@@ -550,28 +615,55 @@ def sb_merge(case, n_tasks):
             raise RuntimeError(f'{tel}: LSST object present in several groups')
         col, pcol = f'blending_entropy_{tel}', f'purity_{tel}'
 
-        groups = load_groups(case, tel)
-        one = np.concatenate([g[1] for g in groups if len(g[0]) == 1 and len(g[1]) == 1]).astype(int)
-        other = np.concatenate([g[1] for g in groups if not (len(g[0]) == 1 and len(g[1]) == 1)]).astype(int)
-        in_one = np.zeros(N, bool); in_one[one] = True
-        in_other = np.zeros(N, bool); in_other[other] = True
+        # which LSST objects are in a 1-1 group, which in a larger group
+        in_one = np.zeros(N, bool)
+        in_other = np.zeros(N, bool)
+        for g in load_groups(case, tel):
+            if len(g[0]) == 1 and len(g[1]) == 1:
+                in_one[g[1]] = True
+            else:
+                in_other[g[1]] = True
         if (in_one & in_other).any():
             raise RuntimeError(f'{tel}: LSST object in both a 1-1 and a larger group')
 
+        fcol = f'sb_flag_{tel}'
+        part_sb = parts[col].to_numpy(float, copy=True)
+        if fcol in parts:
+            part_flag = parts[fcol].to_numpy(object)
+        else:  # parts written before the flag existed: friendly's -1 = only LSST neighbours
+            part_flag = np.where(part_sb == -1, 'obj_only_neighbours',
+                                 np.where(np.isfinite(part_sb), 'computed', 'failed')).astype(object)
+            part_sb[part_sb == -1] = np.nan
+
         sb = np.full(N, np.nan)
         pur = np.full(N, np.nan)
-        sb[parts.index.values] = parts[col].values
+        flag = np.full(N, 'failed', dtype=object)  # objects of larger groups missing from the parts stay 'failed'
+        sb[parts.index.values] = part_sb
         pur[parts.index.values] = parts[pcol].values
-        sb[in_one], pur[in_one] = 0.0, 1.0
+        flag[parts.index.values] = part_flag
+        sb[in_one], pur[in_one], flag[in_one] = 0.0, 1.0, 'one_to_one'
+
+        # objects in no group: why?
         none = ~(in_one | in_other)
-        sb[none], pur[none] = -1.0, -1.0
-        n_nan = int(np.isnan(sb[in_other]).sum())
-        stats[tel] = {'n_objects': N, 'n_one_to_one_zero': int(in_one.sum()), 'n_no_overlap_minus1': int(none.sum()),
-                      'n_computed': int(in_other.sum() - n_nan), 'n_nan_unexpected': n_nan}
-        if n_nan:
-            print(f'WARNING {tel}: {n_nan:,} objects in groups with more than one member have a NaN entropy '
-                  '(missing magnitude or a failed computation); they are left as NaN')
-        lsst[col], lsst[pcol] = sb, pur
+        flag[none] = 'no_ellipse_overlap'
+        fof_path = case.path('groups', f'{initial(tel)}_fof.pkl')
+        if os.path.exists(fof_path):
+            in_fof = np.zeros(N, bool)
+            for g in load(fof_path):
+                in_fof[g[1]] = True
+            flag[none & ~in_fof] = 'no_fof_match'
+        foot = f'in_{tel.lower()}_footprint'
+        if foot in lsst:
+            flag[none & ~lsst[foot].to_numpy(bool)] = 'out_footprint'
+
+        n_failed = int((flag == 'failed').sum())
+        stats[tel] = {'n_objects': N}
+        for name in np.unique(flag.astype(str)):
+            stats[tel]['n_' + name] = int((flag == name).sum())
+        if n_failed:
+            print(f'WARNING {tel}: {n_failed:,} objects in groups with more than one member have a NaN entropy '
+                  '(missing magnitude or a failed computation); they are flagged as failed')
+        lsst[col], lsst[pcol], lsst[fcol] = sb, pur, flag
     lsst.to_parquet(case.path('lsst_sb.parquet'))
     with open(case.path('sb', 'sb_merge_stats.json'), 'w') as f:
         json.dump(stats, f, indent=2)

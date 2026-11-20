@@ -12,6 +12,7 @@ import os
 from .config import Case
 
 STAGES = ('prep', 'fof', 'eot', 'eot_merge', 'magfit', 'sb', 'sb_merge', 'plots')
+EXTRA_STAGES = ('footprint', 'colorfit')  # not part of the submitted chain
 ARRAY_STAGES = ('eot', 'sb')
 TEL_STAGES = ('fof', 'eot', 'eot_merge', 'sb')
 
@@ -67,6 +68,10 @@ def run_stage(case, stage, tel=None, task_id=None, n_tasks=None, run_all=False):
         stages.sb(case, tel, task_id, n_tasks)
     elif stage == 'sb_merge':
         stages.sb_merge(case, n_tasks or case.n_sb_tasks)
+    elif stage == 'colorfit':
+        stages.colorfit(case)
+    elif stage == 'footprint':
+        stages.lsst_footprint(case)
     elif stage == 'plots':
         from . import plots
         plots.all_plots(case)
@@ -82,7 +87,7 @@ def main(argv=None):
         then the case yaml file(s), then the options of that stage (see ``--help``).
     """
     ap = argparse.ArgumentParser(prog='copaings')
-    ap.add_argument('stage', choices=STAGES + ('submit', 'compare'))
+    ap.add_argument('stage', choices=STAGES + EXTRA_STAGES + ('submit', 'compare'))
     ap.add_argument('cases', nargs='+', help='case yaml file(s)')
     ap.add_argument('--tel', choices=('Euclid', 'HST'))
     ap.add_argument('--task-id', type=int)

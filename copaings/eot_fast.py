@@ -1,33 +1,37 @@
-"""Fast ellipse overlap test (EOT): same result as friendly's graph-based test, without the unused work.
+"""Ellipse overlap test (EOT): split each FoF group into groups of really overlapping ellipses.
 
-friendly's group2graph builds a full graph per group (Monte Carlo overlap area on a 1000x1000 grid for every edge,
-purity, magnitudes, blending entropy) although the EOT only needs the connected components of the "ellipses
-intersect" graph. Here we do only that: ellipse parameters in numpy, batched intersection test, scipy components.
+Same result as friendly's ``group2graph``, but it only does what the EOT needs: compute the ellipses, test which
+pairs of ellipses intersect (friendly's ``is_overlapping``, all pairs at once) and group the ellipses linked by a
+chain of intersections. friendly's graph code also computes overlap areas, purities and entropies, which are not
+needed here.
 
-Groups with more than DENSE_MAX members (large FoF linking lengths percolate into groups of 1e5+ objects) do not test
-all pairs: candidate pairs come from a KD-tree (two ellipses can only intersect if their centres are closer than the sum
-of their semi-major axes) and only those are tested exactly. Objects whose ellipse is undefined (NaN moments) count as
-overlapping with everything in a small group, like in friendly; in a big group they link to neighbours within
-`nan_link_px` pixels instead.
+Very large FoF groups (long linking lengths percolate into groups of 1e5+ objects) cannot test all pairs. For groups
+with more than ``dense_max`` members, only the pairs whose centres are closer than the sum of their semi-major axes
+are tested (found with a KD-tree): other pairs cannot intersect. In those groups an object with an undefined
+ellipse (NaN moments) is linked to its neighbours closer than `nan_link_px` pixels; in small groups it is linked to
+every member, like in friendly.
 """
 import numpy as np
 from scipy.spatial import cKDTree
-from scipy.sparse import coo_matrix
-from scipy.sparse.csgraph import connected_components
 
-import friendly.ellipses as ellipses  # deps.py puts friendly on sys.path
+from . import deps
 
-FWHM2SIGMA = 2 * np.sqrt(2 * np.log(2))
+deps.add_friendly_to_path()
+import friendly.ellipses as ellipses  # noqa: E402
+from friendly.matching import connected_groups  # noqa: E402
+
+FWHM_OVER_SIGMA = 2 * np.sqrt(2 * np.log(2))
 DENSE_MAX = 400  # groups up to this size test all pairs
-PAIR_CHUNK = 400_000
-SMALL_R_PX = 8.0  # ellipses with semi-major axis below this (pixels) use the cheap small-small search
+PAIR_CHUNK = 400_000  # pairs tested at once in big groups (limits memory)
+SMALL_R_PX = 8.0  # ellipses with a semi-major axis up to this [pixel] are "small" in `candidate_pairs`
 
 
 class EllipseCache:
-    """Ellipse parameters of the LSST catalog and the columns of the true catalog needed to place its ellipses.
+    """Ellipses of the LSST catalog, and the columns of the true catalog needed to build its ellipses.
 
-    Computed once per job. The LSST ellipses come from the i-band second moments; the true-catalog ellipses are built
-    per group by `true_params`.
+    Built once per job. The LSST ellipses come from the i-band second moments; the ellipses of the true objects
+    depend on the group (they are placed relative to an LSST object and broadened by its PSF) and are built by
+    `true_params`.
 
     Parameters
     ----------
@@ -36,10 +40,9 @@ class EllipseCache:
     true_cat : pandas.DataFrame
         True catalog with ``ra``, ``dec``, ``size_true``, ``size_minor_true``, ``position_angle_true``.
     pixel_scale : float, default 0.2
-        LSST pixel scale [arcsec/pixel] (friendly hardcodes 0.2).
+        LSST pixel scale [arcsec/pixel].
     nan_link_px : float, default 10.0
-        In groups handled by the KD-tree path, an object with an undefined ellipse is linked to neighbours closer than
-        this [pixel].
+        In big groups, an object with an undefined ellipse is linked to its neighbours closer than this [pixel].
 
     Attributes
     ----------
@@ -48,144 +51,111 @@ class EllipseCache:
     lamax : numpy.ndarray
         Semi-major axis of every LSST ellipse [pixel] (NaN where undefined).
     abs_frame : tuple of float or None
-        Centre (ra0, dec0) of the common tangent plane of the LSST ``x``, ``y``, if every object agrees on it.
+        ``(ra0, dec0)``, centre of the tangent plane in which the LSST ``x``, ``y`` were computed by `prep`, or None if
+        the ``x``, ``y`` are not in one common plane.
     """
 
     def __init__(self, lsst, true_cat, pixel_scale=0.2, nan_link_px=10.0):
-        """Compute the LSST ellipse parameters and keep the true-catalog columns (see the class docstring)."""
-        self.ps = pixel_scale  # friendly.ellipses.deg2pix hardcodes 0.2
+        """Compute the LSST ellipses and keep the true-catalog columns (see the class docstring)."""
+        self.ps = pixel_scale
         self.nan_link_px = nan_link_px
-        self.lx, self.ly = lsst['x'].values, lsst['y'].values
-        self.lra, self.ldec = lsst['ra'].values, lsst['dec'].values
-        self.fwhm = lsst['psf_fwhm_i'].values
-        a, b, th = ellipses.moments2ab(lsst['Ixx_pixel_i'].values, lsst['Iyy_pixel_i'].values, lsst['Ixy_pixel_i'].values)
-        self.lparam = np.column_stack(ellipses.ab2AB(self.lx, self.ly, a, b, th))  # (N, 6)
-        self.lamax = np.where(np.isfinite(a) & np.isfinite(b), np.maximum(a, b), np.nan)  # semi-major axis, pixels
-        # Common tangent-plane frame of the LSST x, y (built from ra/dec in prep): recover its centre so that true objects
-        # can be placed in the same frame, whatever the size of the group (valid only if every object agrees on it).
-        cd = np.cos(np.radians(self.ldec))
+
+        # LSST catalog
+        self.lx, self.ly = lsst['x'].to_numpy(), lsst['y'].to_numpy()
+        self.lra, self.ldec = lsst['ra'].to_numpy(), lsst['dec'].to_numpy()
+        self.fwhm = lsst['psf_fwhm_i'].to_numpy()
         with np.errstate(invalid='ignore', divide='ignore'):
-            ra0 = self.lra + self.lx * pixel_scale / (3600 * cd)
+            a, b, theta = ellipses.moments2ab(lsst['Ixx_pixel_i'].to_numpy(), lsst['Iyy_pixel_i'].to_numpy(),
+                                              lsst['Ixy_pixel_i'].to_numpy())
+        self.lparam = np.column_stack(ellipses.ab2AB(self.lx, self.ly, a, b, theta))
+        self.lamax = np.where(np.isfinite(a) & np.isfinite(b), np.maximum(a, b), np.nan)
+
+        # `prep` computes x = (ra0 - ra) cos(dec) / pixel_scale and y = (dec - dec0) / pixel_scale. Invert this
+        # for every object: if they all give the same (ra0, dec0), the x, y are in one common plane and the true
+        # objects of big groups can be placed in it directly.
+        with np.errstate(invalid='ignore', divide='ignore'):
+            ra0 = self.lra + self.lx * pixel_scale / (3600 * np.cos(np.radians(self.ldec)))
             dec0 = self.ldec - self.ly * pixel_scale / 3600
         self.abs_frame = None
         if np.isfinite(ra0).sum() > 100 and np.nanstd(ra0) < 1e-6 and np.nanstd(dec0) < 1e-6:
             self.abs_frame = (float(np.nanmedian(ra0)), float(np.nanmedian(dec0)))
-        self.tra, self.tdec = true_cat['ra'].values, true_cat['dec'].values
-        self.tsize, self.tminor = true_cat['size_true'].values, true_cat['size_minor_true'].values
-        self.tpa = true_cat['position_angle_true'].values
 
-    def true_params(self, idx_t, idx_o, big=False):
-        """Ellipses of the true objects of one group.
+        # true catalog
+        self.tra, self.tdec = true_cat['ra'].to_numpy(), true_cat['dec'].to_numpy()
+        self.tsize, self.tminor = true_cat['size_true'].to_numpy(), true_cat['size_minor_true'].to_numpy()
+        self.tpa = true_cat['position_angle_true'].to_numpy()
 
-        Same as friendly's ``deg2pix`` followed by ``ab2AB``: the axes are broadened by the PSF in quadrature and the
-        position angle is converted to the pixel frame. In a normal group the objects are placed relative to the first LSST
-        object and use its PSF. In a big group (spanning arcminutes) they are placed in the common LSST frame and use the
-        PSF of the nearest LSST member.
+    def true_params(self, true_rows, lsst_rows, big=False):
+        """Ellipses of the true objects of one group, in the LSST pixel frame.
+
+        Same as friendly's ``deg2pix`` followed by ``ab2AB``: the axes are broadened by the PSF and the position angle
+        is converted to the pixel frame.
+
+        * Normal group: the objects are placed relative to the first LSST object of the group and use its PSF.
+        * Big group (spanning arcminutes): they are placed in the common LSST frame and use the PSF of their
+          nearest LSST object of the group.
 
         Parameters
         ----------
-        idx_t : array_like of int
+        true_rows : sequence of int
             Rows of the true objects in the true catalog.
-        idx_o : sequence of int
-            Rows of the LSST objects of the group; the first one is the reference.
+        lsst_rows : sequence of int
+            Rows of the LSST objects of the group.
         big : bool, default False
             Use the big-group placement.
 
         Returns
         -------
         params : numpy.ndarray
-            Conic parameters (A, B, C, D, E, F), shape (len(idx_t), 6).
+            Conic parameters (A, B, C, D, E, F), shape (len(true_rows), 6).
         x, y : numpy.ndarray
             Centres [pixel].
         amax : numpy.ndarray
             Semi-major axes [pixel].
         """
-        idx_t = np.asarray(idx_t)
-        o = idx_o[0]
+        t = np.asarray(true_rows, dtype=int)
+        ra, dec = self.tra[t], self.tdec[t]
+        ref = lsst_rows[0]
+
         if big:
-            io = np.asarray(idx_o, dtype=int)
-            ok = np.isfinite(self.fwhm[io])
-            cdec = np.cos(np.radians(self.tdec[idx_t]))
-            if ok.any():
-                tree = cKDTree(np.column_stack([self.lra[io[ok]] * np.cos(np.radians(self.ldec[io[ok]])), self.ldec[io[ok]]]))
-                _, nn = tree.query(np.column_stack([self.tra[idx_t] * cdec, self.tdec[idx_t]]))
-                fwhm = self.fwhm[io[ok]][nn]
-            else:
-                fwhm = np.full(len(idx_t), np.nan)
+            fwhm = self._nearest_lsst_fwhm(ra, dec, np.asarray(lsst_rows, dtype=int))
         else:
-            fwhm = self.fwhm[o]
-        psf = np.sqrt(2) * fwhm / FWHM2SIGMA / 3600  # deg
-        a = np.sqrt((self.tsize[idx_t] / 3600) ** 2 + psf ** 2) * 3600 / self.ps
-        b = np.sqrt((self.tminor[idx_t] / 3600) ** 2 + psf ** 2) * 3600 / self.ps
-        theta = 270 - self.tpa[idx_t]
+            fwhm = self.fwhm[ref]
+        psf = np.sqrt(2) * fwhm / FWHM_OVER_SIGMA / 3600  # deg
+
+        a = np.sqrt((self.tsize[t] / 3600) ** 2 + psf ** 2) * 3600 / self.ps
+        b = np.sqrt((self.tminor[t] / 3600) ** 2 + psf ** 2) * 3600 / self.ps
+        theta = 270 - self.tpa[t]
         theta = np.where(theta > 180, theta - 180, theta)
+
         if big and self.abs_frame is not None:
             ra0, dec0 = self.abs_frame
-            x = (ra0 - self.tra[idx_t]) * np.cos(np.radians(self.tdec[idx_t])) * 3600 / self.ps
-            y = (self.tdec[idx_t] - dec0) * 3600 / self.ps
+            x = (ra0 - ra) * np.cos(np.radians(dec)) * 3600 / self.ps
+            y = (dec - dec0) * 3600 / self.ps
         else:
-            dx = (self.lra[o] - self.tra[idx_t]) * np.cos(np.radians((self.tdec[idx_t] + self.ldec[o]) / 2)) * 3600 / self.ps
-            dy = (self.ldec[o] - self.tdec[idx_t]) * 3600 / self.ps
-            x, y = self.lx[o] + dx, self.ly[o] - dy
-        return np.column_stack(ellipses.ab2AB(x, y, a, b, theta)), x, y, np.maximum(a, b)
+            dx = (self.lra[ref] - ra) * np.cos(np.radians((dec + self.ldec[ref]) / 2)) * 3600 / self.ps
+            dy = (self.ldec[ref] - dec) * 3600 / self.ps
+            x, y = self.lx[ref] + dx, self.ly[ref] - dy
+
+        params = np.column_stack(ellipses.ab2AB(x, y, a, b, theta))
+        return params, x, y, np.maximum(a, b)
+
+    def _nearest_lsst_fwhm(self, ra, dec, lsst_rows):
+        """PSF FWHM of the nearest LSST object (among `lsst_rows` with a valid PSF) of each position."""
+        ok = lsst_rows[np.isfinite(self.fwhm[lsst_rows])]
+        if len(ok) == 0:
+            return np.full(len(ra), np.nan)
+        tree = cKDTree(np.column_stack([self.lra[ok] * np.cos(np.radians(self.ldec[ok])), self.ldec[ok]]))
+        _, nearest = tree.query(np.column_stack([ra * np.cos(np.radians(dec)), dec]))
+        return self.fwhm[ok][nearest]
 
 
-def _det(r0, r1, r2):
-    """Batched 3x3 determinant.
+def candidate_pairs(x, y, r):
+    """Pairs of ellipses that could intersect: centres closer than the sum of their semi-major axes.
 
-    Parameters
-    ----------
-    r0, r1, r2 : tuple of numpy.ndarray
-        The three rows; each is a tuple of 3 arrays of shape (n,).
-
-    Returns
-    -------
-    numpy.ndarray
-        Determinants, shape (n,).
-    """
-    m = np.stack([np.stack(r0, -1), np.stack(r1, -1), np.stack(r2, -1)], -2)
-    return np.linalg.det(m)
-
-
-def is_overlapping_batch(p1, p2):
-    """Test whether pairs of ellipses intersect.
-
-    Vectorised version of ``friendly.ellipses.is_overlapping`` (the algebraic test on the conic matrices).
-
-    Parameters
-    ----------
-    p1, p2 : numpy.ndarray
-        Conic parameters (A, B, C, D, E, F) of the first and second ellipse of each pair, shape (n, 6).
-
-    Returns
-    -------
-    numpy.ndarray
-        Boolean array of length n, True where the two ellipses intersect.
-    """
-    A1, B1, C1, D1, E1, F1 = p1.T
-    A2, B2, C2, D2, E2, F2 = p2.T
-    l0 = _det((A2, C2, D2), (C2, B2, E2), (D2, E2, F2))
-    l1 = (_det((A1, C2, D2), (C1, B2, E2), (D1, E2, F2))
-          + _det((A2, C1, D2), (C2, B1, E2), (D2, E1, F2))
-          + _det((A2, C2, D1), (C2, B2, E1), (D2, E2, F1))) / 3
-    l2 = (_det((A2, C1, D1), (C2, B1, E1), (D2, E1, F1))
-          + _det((A1, C2, D1), (C1, B2, E1), (D1, E2, F1))
-          + _det((A1, C1, D2), (C1, B1, E2), (D1, E1, F2))) / 3
-    l3 = _det((A1, C1, D1), (C1, B1, E1), (D1, E1, F1))
-
-    d1 = l3 * l1 - l2 * l2
-    d2 = l3 * l0 - l1 * l2
-    d3 = l2 * l0 - l1 * l1
-    disc = (2 * d1) * (2 * d3) - d2 * d2
-    return ~((disc >= 0) & ((l1 > 0) | (l2 > 0)))
-
-
-def _candidate_pairs(x, y, r):
-    """Pairs of ellipses that could intersect, from a KD-tree search.
-
-    Two ellipses can only intersect if their centres are closer than the sum of their semi-major axes. Small ellipses
-    (axis up to `SMALL_R_PX`) are searched among themselves with a single radius; each large ellipse is searched against the
-    small ones and against the other large ones.
+    A KD-tree finds the neighbours. One search with the largest possible distance (2 * max(r)) would return far
+    too many pairs when a few ellipses are huge, so the ellipses are split into "small" (r <= SMALL_R_PX) and
+    "large", and each kind of pair is searched with its own radius.
 
     Parameters
     ----------
@@ -196,97 +166,106 @@ def _candidate_pairs(x, y, r):
 
     Returns
     -------
-    i, j : numpy.ndarray of int
-        Indices of the candidate pairs, ``i != j``, each pair once.
+    first, second : numpy.ndarray of int
+        Indices of the candidate pairs, each pair once, ``first != second``.
     """
     xy = np.column_stack([x, y])
-    small = r <= SMALL_R_PX
-    out_i, out_j = [], []
-    keep_pairs = lambda a, b: np.hypot(x[a] - x[b], y[a] - y[b]) <= r[a] + r[b]
+    small = np.flatnonzero(r <= SMALL_R_PX)
+    large = np.flatnonzero(r > SMALL_R_PX)
+    first, second = [], []
 
-    sid = np.flatnonzero(small)
-    if len(sid) > 1:  # small - small
-        p = cKDTree(xy[sid]).query_pairs(2 * r[sid].max(), output_type='ndarray')
-        if len(p):
-            a, b = sid[p[:, 0]], sid[p[:, 1]]
-            k = keep_pairs(a, b)
-            out_i.append(a[k]); out_j.append(b[k])
-    lid = np.flatnonzero(~small)
-    if len(lid):
-        if len(sid):  # large - small
-            ts = cKDTree(xy[sid])
-            lists = ts.query_ball_point(xy[lid], r[lid] + SMALL_R_PX)
-            for k, nb in zip(lid, lists):
-                if len(nb):
-                    b = sid[np.asarray(nb, dtype=int)]
-                    kk = np.hypot(x[k] - x[b], y[k] - y[b]) <= r[k] + r[b]
-                    out_i.append(np.full(kk.sum(), k)); out_j.append(b[kk])
-        if len(lid) > 1:  # large - large
-            p = cKDTree(xy[lid]).query_pairs(2 * r[lid].max(), output_type='ndarray')
-            if len(p):
-                a, b = lid[p[:, 0]], lid[p[:, 1]]
-                k = keep_pairs(a, b)
-                out_i.append(a[k]); out_j.append(b[k])
-    if not out_i:
+    # small - small
+    if len(small) > 1:
+        pairs = cKDTree(xy[small]).query_pairs(2 * r[small].max(), output_type='ndarray')
+        first.append(small[pairs[:, 0]])
+        second.append(small[pairs[:, 1]])
+
+    # large - small: around each large ellipse, the small ones closer than its axis + SMALL_R_PX
+    if len(large) > 0 and len(small) > 0:
+        tree = cKDTree(xy[small])
+        neighbours = tree.query_ball_point(xy[large], r[large] + SMALL_R_PX)
+        for k, near in zip(large, neighbours):
+            first.append(np.full(len(near), k))
+            second.append(small[np.asarray(near, dtype=int)])
+
+    # large - large
+    if len(large) > 1:
+        pairs = cKDTree(xy[large]).query_pairs(2 * r[large].max(), output_type='ndarray')
+        first.append(large[pairs[:, 0]])
+        second.append(large[pairs[:, 1]])
+
+    if not first:
         return np.zeros(0, int), np.zeros(0, int)
-    return np.concatenate(out_i).astype(int), np.concatenate(out_j).astype(int)
+    first = np.concatenate(first).astype(int)
+    second = np.concatenate(second).astype(int)
+
+    close = np.hypot(x[first] - x[second], y[first] - y[second]) <= r[first] + r[second]
+    return first[close], second[close]
 
 
 def split_group(cache, grp, dense_max=DENSE_MAX):
     """Split a FoF group into groups of overlapping ellipses.
 
-    Returns the connected components of the graph whose edges join intersecting ellipses. Groups up to `dense_max`
-    members test all pairs and, like friendly's ``group2graph``, drop true objects whose row number equals the row
-    number of an LSST object of the group. Bigger groups use `_candidate_pairs` and keep all objects.
+    The ellipses are the nodes of a graph, with an edge between two ellipses that intersect; the result is the list
+    of connected parts of this graph. Groups up to `dense_max` members test all pairs and, like friendly's
+    ``group2graph``, drop the true objects whose row number equals the row number of an LSST object of the group.
+    Bigger groups test only the pairs of `candidate_pairs` and keep all objects.
 
     Parameters
     ----------
     cache : EllipseCache
     grp : sequence
-        ``[true_indices, lsst_indices]`` (rows in the true and LSST catalogs).
+        ``[true_rows, lsst_rows]`` (rows in the true and LSST catalogs).
     dense_max : int, default DENSE_MAX
-        Group size above which the KD-tree path is used (0 = always).
+        Group size above which only the candidate pairs are tested (0 = always).
 
     Returns
     -------
     list
-        Components ``[true_indices, lsst_indices]``, ordered by first member. A component can lack a true or an LSST
+        Groups ``[true_rows, lsst_rows]``, ordered by their first member. A group can lack a true or an LSST
         object; callers drop those.
     """
-    idx_o = list(grp[1])
-    big = len(grp[0]) + len(idx_o) > dense_max  # KD-tree path
-    if big:
-        idx_t = list(grp[0])  # the "same index = duplicate" rule below is meaningless in groups holding most of a catalog
-    else:
-        obs_set = set(idx_o)
-        idx_t = [t for t in grp[0] if t not in obs_set]  # friendly drops "duplicate ids" (0 cases in small groups)
-    nt, no = len(idx_t), len(idx_o)
-    n = nt + no
-    if nt == 0:
-        return [[[], idx_o]] if no else []
-    tparams, tx, ty, tr = cache.true_params(np.asarray(idx_t), idx_o, big=big)
-    params = np.vstack([tparams, cache.lparam[idx_o]])
+    true_rows = list(grp[0])
+    lsst_rows = list(grp[1])
+    big = len(true_rows) + len(lsst_rows) > dense_max
+
     if not big:
-        ii, jj = np.triu_indices(n, k=1)
-        hit = is_overlapping_batch(params[ii], params[jj]) if len(ii) else np.zeros(0, bool)
-        ii, jj = ii[hit], jj[hit]
-    else:
-        x = np.concatenate([tx, cache.lx[idx_o]])
-        y = np.concatenate([ty, cache.ly[idx_o]])
-        r = np.concatenate([tr, cache.lamax[idx_o]])
-        bad = ~np.isfinite(r) | ~np.isfinite(params).all(axis=1)
-        r = np.where(bad, cache.nan_link_px, r)
-        ci, cj = _candidate_pairs(x, y, r)
-        hits = np.zeros(len(ci), bool)
-        for s0 in range(0, len(ci), PAIR_CHUNK):
-            sl = slice(s0, s0 + PAIR_CHUNK)
-            hits[sl] = is_overlapping_batch(params[ci[sl]], params[cj[sl]])
-        hits |= bad[ci] | bad[cj]  # undefined ellipse: linked to neighbours within nan_link_px
-        ii, jj = ci[hits], cj[hits]
-    g = coo_matrix((np.ones(len(ii)), (ii, jj)), shape=(n, n))
-    _, labels = connected_components(g, directed=False)
-    out = {}
-    for k, lab in enumerate(labels):
-        comp = out.setdefault(lab, [[], []])
-        (comp[0] if k < nt else comp[1]).append(idx_t[k] if k < nt else idx_o[k - nt])
-    return list(out.values())
+        lsst_set = set(lsst_rows)
+        true_rows = [t for t in true_rows if t not in lsst_set]  # friendly's "duplicate id" rule
+    if not true_rows:
+        return [[[], lsst_rows]] if lsst_rows else []
+
+    # graph nodes: the true objects first, then the LSST objects
+    n_true = len(true_rows)
+    n_nodes = n_true + len(lsst_rows)
+    true_params, tx, ty, t_axis = cache.true_params(true_rows, lsst_rows, big=big)
+    params = np.vstack([true_params, cache.lparam[lsst_rows]])
+
+    with np.errstate(invalid='ignore', over='ignore'):
+        if not big:
+            first, second = np.triu_indices(n_nodes, k=1)  # every pair of nodes
+            overlap = ellipses.is_overlapping(params[first], params[second])
+        else:
+            x = np.concatenate([tx, cache.lx[lsst_rows]])
+            y = np.concatenate([ty, cache.ly[lsst_rows]])
+            axis = np.concatenate([t_axis, cache.lamax[lsst_rows]])
+            undefined = ~np.isfinite(axis) | ~np.isfinite(params).all(axis=1)
+            axis = np.where(undefined, cache.nan_link_px, axis)
+
+            first, second = candidate_pairs(x, y, axis)
+            overlap = np.zeros(len(first), bool)
+            for start in range(0, len(first), PAIR_CHUNK):
+                chunk = slice(start, start + PAIR_CHUNK)
+                overlap[chunk] = ellipses.is_overlapping(params[first[chunk]], params[second[chunk]])
+            overlap |= undefined[first] | undefined[second]  # undefined ellipse: linked to its close neighbours
+
+    group_of_node = connected_groups(n_nodes, first[overlap], second[overlap])
+
+    groups = {}
+    for node, g in enumerate(group_of_node):
+        members = groups.setdefault(g, [[], []])
+        if node < n_true:
+            members[0].append(true_rows[node])
+        else:
+            members[1].append(lsst_rows[node - n_true])
+    return list(groups.values())

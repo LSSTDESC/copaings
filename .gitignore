@@ -11,3 +11,8 @@ notebooks/copaings_runs/
 *.pkl
 *.parquet
 slurm/
+
+# personal case files: kept in cases/ but not pushed
+cases/lsst_dp2_euclid_dr1_ecdfs.yaml
+cases/dp2_hst_cosmos.yaml
+cases/demo_dp2_box copy.yaml
